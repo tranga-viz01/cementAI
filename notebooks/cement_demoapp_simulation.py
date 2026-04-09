@@ -82,8 +82,8 @@ CATEGORY_MAP = {
 }
 
 BLAINE_TARGETS = {
-    0: {"name": "PPC", "target": 395, "range": "390-400"},
-    1: {"name": "OPC", "target": 295, "range": "290-300"},
+    0: {"name": "PPC", "target": 370, "range": "390-400"},
+    1: {"name": "OPC", "target": 290, "range": "290-300"},
 }
 
 FEED_BIN_START = 100
@@ -97,9 +97,9 @@ DEMO_SCENARIOS = {
         "narrative": "As separator RPM increases, circulating load rises, the mill starts filling up, mill sound falls, and bucket elevator load rises.",
         "demo_input_caption": "Suggested target Blaine is midpoint of the target range",
         "mill_sound_before": 70.0,
-        "mill_sound_after": 55.0,
-        "be_amp_before": 55.0,
-        "be_amp_after": 70.0,
+        "mill_sound_after": 65.0,
+        "be_amp_before": 52.0,
+        "be_amp_after": 55.0,
         "default_interpretation": "Expected fuller mill condition",
         "fallback_recommendation": "Reduce feed by 1-3 TPH",
         "header_note": "Scenario 1 is ON: Separator RPM increase simulates Mill to be filling more so Mill Sound will decrease and BE Load will increase, then the next feed recommendation is expected to reduce feed.",
@@ -109,7 +109,7 @@ DEMO_SCENARIOS = {
         "trigger": "Reduce separator RPM",
         "narrative": "As separator RPM decreases, circulating load eases, mill sound rises, and bucket elevator load drops, indicating room to raise feed.",
         "demo_input_caption": "Suggested target Blaine is midpoint of the target range",
-        "mill_sound_before": 70.0,
+        "mill_sound_before": 75.0,
         "mill_sound_after": 85.0,
         "be_amp_before": 55.0,
         "be_amp_after": 48.0,
@@ -283,9 +283,9 @@ def classify_row(cement_category, feed_bin, mill_sound, be_amp):
         mill_sound,
         sound_ref["q25"],
         sound_ref["q75"],
-        low_label="overloaded",
+        low_label="underloaded",
         mid_label="stable",
-        high_label="underloaded",
+        high_label="overloaded",
     )
 
     amp_status = get_status(
@@ -372,6 +372,59 @@ def get_feed_advisory(cement_category, total_tph, mill_sound, be_amp):
     if total_tph <= 0 or mill_sound <= 0 or be_amp <= 0:
         return {"error": "All inputs must be greater than zero."}
 
+    # =========================================
+    # HARD SAFETY LIMITS (SME RULES)
+    # =========================================
+    if mill_sound >= 95:
+        return {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "cement_category": cement_category,
+            "product_name": CATEGORY_MAP.get(cement_category, str(cement_category)),
+            "total_feed_tph": round(float(total_tph), 2),
+            "feed_bin": "N/A",
+            "mill_sound_pct": round(float(mill_sound), 2),
+            "be_amp": round(float(be_amp), 2),
+            "sound_status": "critical_overload",
+            "amp_status": "critical_overload",
+            "interpretation": "Severe choke risk",
+            "tph_change": -5,
+            "recommendation": "Reduce feed by 5 TPH immediately",
+            "reason": "Mill pholaphone indicates severe choke condition (>95%). Immediate unloading required.",
+            "caution": "Critical condition — take action immediately.",
+            "sound_q25": None,
+            "sound_median": None,
+            "sound_q75": None,
+            "amp_q25": None,
+            "amp_median": None,
+            "amp_q75": None,
+        }
+
+    elif mill_sound >= 87:
+        return {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "cement_category": cement_category,
+            "product_name": CATEGORY_MAP.get(cement_category, str(cement_category)),
+            "total_feed_tph": round(float(total_tph), 2),
+            "feed_bin": "N/A",
+            "mill_sound_pct": round(float(mill_sound), 2),
+            "be_amp": round(float(be_amp), 2),
+            "sound_status": "high_load",
+            "amp_status": "high_load",
+            "interpretation": "Choke tendency",
+            "tph_change": -3,
+            "recommendation": "Reduce feed by 3 TPH",
+            "reason": "Mill pholaphone above safe operating range (>87%). Preventive unloading recommended.",
+            "caution": "Monitor closely — risk of choking if trend continues.",
+            "sound_q25": None,
+            "sound_median": None,
+            "sound_q75": None,
+            "amp_q25": None,
+            "amp_median": None,
+            "amp_q75": None,
+        }
+
+
+
     feed_bin = assign_feed_bin(total_tph)
     if feed_bin is None:
         return {"error": f"Feed outside configured range {FEED_BIN_START}-{FEED_BIN_END} TPH."}
@@ -448,16 +501,19 @@ def get_separator_advisory(cement_category, blaine, rpm):
     blaine_gap_pct = ((target_blaine - blaine) / blaine) * 100
     suggested_rpm = rpm * (1 + blaine_gap_pct / 100)
 
+    rpm_change = suggested_rpm
+
     if blaine_gap_pct > 0:
         interpretation = "Blaine below target"
-        recommendation = f"Increase separator RPM by {abs(blaine_gap_pct):.2f}%"
+        recommendation = f"New suggested separator RPM: {abs(suggested_rpm):.1f} RPM ({abs(blaine_gap_pct):.2f}%)"
+
     elif blaine_gap_pct < 0:
         interpretation = "Blaine above target"
-        recommendation = f"Reduce separator RPM by {abs(blaine_gap_pct):.2f}%"
+        recommendation = f"New suggested separator RPM: {abs(suggested_rpm):.1f} RPM ({abs(blaine_gap_pct):.2f}%)"
+
     else:
         interpretation = "Blaine on target"
         recommendation = "Maintain current separator RPM"
-
     reason = (
         f"{product_name} target Blaine is {target_blaine}. "
         f"Current Blaine is {blaine:.2f}, so required correction is {blaine_gap_pct:.2f}%."
@@ -857,25 +913,27 @@ with tab2:
                     sound_delta = sim_result["mill_sound_after"] - sim_result["mill_sound_before"]
 
                     s1, s2, s3 = st.columns(3)
+
                     with s1:
                         st.metric(
                             "Mill Sound (%)",
-                            f"{sim_result['mill_sound_after']:.1f}",
+                            f"{sim_result['mill_sound_before']:.1f} → {sim_result['mill_sound_after']:.1f}",
                             delta=f"{sound_delta:.1f}",
                         )
+
                     with s2:
                         st.metric(
                             "BE Load (AMP)",
-                            f"{sim_result['be_amp_after']:.1f}",
+                            f"{sim_result['be_amp_before']:.1f} → {sim_result['be_amp_after']:.1f}",
                             delta=f"{be_delta:.1f}",
                         )
+
                     with s3:
                         st.metric(
                             "Separator RPM",
-                            f"{sim_result['separator_rpm_after']:.1f}",
+                            f"{sim_result['separator_rpm_before']:.1f} → {sim_result['separator_rpm_after']:.1f}",
                             delta=f"{rpm_delta:.1f}",
                         )
-
                     st.write(f"**Expected feed-side interpretation:** {sim_result['predicted_feed_interpretation']}")
                     st.markdown(
                         f'<div class="next-step-box">Expected next feed recommendation within 15min: {sim_result["predicted_feed_recommendation"]}</div>',
